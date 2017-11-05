@@ -4,7 +4,7 @@ topnav:
 - title: Topnav
   items:
     - title: Archive
-      url: "archive.html"
+      url: "/pages/archive/"
 
 #Topnav dropdowns
 topnav_dropdowns:
@@ -13,8 +13,8 @@ topnav_dropdowns:
     - title: Study Guides
       folderitems:
         - title: VCAP5-DCD
-          url: "vcap5-dcd.html"
+          url: "/2012/08/vcap5-dcd/"
         - title: VCAP5-DCA
-          url: "vcap5-dca.html"
+          url: "/2012/09/vcap5-dca/"
         - title: RHCSA and RHCE
-          url: "rhcsa-and-rhce-study-guide.html"
+          url: "/2012/12/rhcsa-and-rhce-study-guide/"

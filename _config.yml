@@ -8,6 +8,13 @@ permalink: :year/:month/:title/
 topnav_title: Blog
 # this appears on the top navigation bar next to the home button
 
+title : Blog
+author: 
+  name : Karim Elatov
+  email : elatov@users.noreply.github.com
+  github : elatov
+  twitter : elatov
+
 site_title: Karim's Blog
 # this appears in the html browser tab for the site title (seen mostly by search engines, not users)
 
@@ -23,7 +30,7 @@ site_title: Karim's Blog
 #disqus_shortname: idrbwjekyll
 # if you're using disqus for comments, add the shortname here. if not, leave this value blank.
 
-google_analytics: UA-66296557-1
+google_analytics: UA-51015706-1
 # if you have google-analytics ID, put it in. if not, edit this value to blank.
 
 host: 127.0.0.1
@@ -103,9 +110,8 @@ defaults:
 #- product2_sidebar
 #- other
 
-description: "Just a random blog"
+description: "Just a blog"
 # the description is used in the feed.xml file
 
 # needed for sitemap.xml file only
-url: https://elatov.github.io
-baseurl: /jekyll-theme-test
+url: https://elatok.github.io
