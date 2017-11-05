@@ -256,3 +256,11 @@ li.sidebarTitle {
   border:1px solid #4C964D;
   color:#FFF;
 }
+
+.post-link {
+    font-size: 19px;
+}
+
+.post-list p {
+    margin: 6px 0px;
+}
