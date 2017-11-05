@@ -5,7 +5,6 @@ topnav:
   items:
     - title: Archive
       url: "/pages/archive/"
-  items:
     - title: Categories
       url: "/pages/cat/"
 
