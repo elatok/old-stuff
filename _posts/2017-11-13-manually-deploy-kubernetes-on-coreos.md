@@ -6,11 +6,314 @@ author: Karim Elatov
 categories: [containers]
 tags: [kubernetes,flannel,docker,coreos,etcd]
 ---
+### Deploying Kubernetes 1.5.x on CoreOS
+I started out with an older version of CoreOS and just kept updating it. I also had an old version of **etcd** (version 2) and newer versions of Kubernetes required **etcd3**. So at first I decided to deploy an older version of **kubernetes**. There are actually pretty nice instructions at these sites:
+
+* [Setup Kubernetes on CoreOS](https://medium.com/@kasun.dsilva/setup-kubernetes-on-coreos-f801e6db8dec)
+* [Deploy Kubernetes Master Node(s)](https://coreos.com/kubernetes/docs/1.5.1/deploy-master.html)
+* [How to Deploy Kubernetes on CoreOS Cluster](https://www.upcloud.com/support/deploy-kubernetes-coreos/)
+
+#### Create SSL Certificates
+The easiest thing to do is use of the scripts provided in the above sites. Here is what I ended up with:
+
+	# cat gen-certs.sh
+	#!/bin/bash
+	# Creating TLS certs
+	echo "Creating CA ROOT**********************************************************************"
+	openssl genrsa -out ca-key.pem 2048
+	openssl req -x509 -new -nodes -key ca-key.pem -days 10000 -out ca.pem -subj "/CN=kube-ca"
+	echo "creating API Server certs*************************************************************"
+	master_Ip=192.168.1.106
+	cat >openssl.cnf<<EOF
+	[req]
+	req_extensions = v3_req
+	distinguished_name = req_distinguished_name
+	[req_distinguished_name]
+	[ v3_req ]
+	basicConstraints = CA:FALSE
+	keyUsage = nonRepudiation, digitalSignature, keyEncipherment
+	subjectAltName = @alt_names
+	[alt_names]
+	DNS.1 = kubernetes
+	DNS.2 = kubernetes.default
+	DNS.3 = kubernetes.default.svc
+	DNS.4 = kubernetes.default.svc.cluster.local
+	IP.1 = 10.3.0.1
+	IP.2 = $master_Ip
+	EOF
+
+	openssl genrsa -out apiserver-key.pem 2048
+	openssl req -new -key apiserver-key.pem -out apiserver.csr -subj "/CN=kube-apiserver" -config openssl.cnf
+	openssl x509 -req -in apiserver.csr -CA ca.pem -CAkey ca-key.pem -CAcreateserial -out apiserver.pem -days 365 -extensions v3_req -extfile openssl.cnf
+	echo "Creating Admin certs********************************************************"
+	openssl genrsa -out admin-key.pem 2048
+	openssl req -new -key admin-key.pem -out admin.csr -subj "/CN=kube-admin"
+	openssl x509 -req -in admin.csr -CA ca.pem -CAkey ca-key.pem -CAcreateserial -out admin.pem -days 365
+	echo "DONE !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+
+Then after running that script, you will have the following files:
+
+	core certs # ls
+	admin-key.pem  admin.pem          apiserver.csr  ca-key.pem  ca.srl        openssl.cnf
+	admin.csr      apiserver-key.pem  apiserver.pem  ca.pem      gen-certs.sh
+
+So let's put the files into a location for kubernetes to use:
+
+	core certs # mkdir -p /etc/kubernetes/ssl
+	core certs # cp *.pem /etc/kubernetes/ssl
+
+### Configuring Flannel
+Initially I wanted to use **flannel** for networking, so I created the following files:
+
+	core # cat /etc/kubernetes/cni/docker_opts_cni.env
+	DOCKER_OPT_BIP=""
+	DOCKER_OPT_IPMASQ=""
+	core # cat /etc/kubernetes/cni/net.d/10-flannel.conf
+	{
+	    "name": "podnet",
+	    "type": "flannel",
+	    "delegate": {
+	        "isDefaultGateway": false
+	    }
+	}
+	core # cat /etc/systemd/system/docker.service.d/60-docker-wait-for-flannel-config.conf
+	[Unit]
+	After=flanneld.service
+	Requires=flanneld.service
+
+	[Service]
+	Restart=always
+	EnvironmentFile=/etc/kubernetes/cni/docker_opts_cni.env
+
+	[Install]
+	WantedBy=multi-user.target
+	core # cat /etc/systemd/system/flanneld.service.d/40-ExecStartPre-symlink.conf
+	[Service]
+	ExecStartPre=/usr/bin/ln -sf /etc/flannel/options.env /run/flannel/options.env
+	
 From my previous config with **flannel**, I already had a network defined:
 
 	core ~ # etcdctl get /coreos.com/network/config
 	{"Network":"10.2.0.0/16", "Backend": {"Type": "vxlan"}}
 
+
+#### Create the kubelet Service
+Next we can create a service that will run all the containers for **kubernetes**. Here is the version for 1.5.1:
+
+	core # cat /etc/systemd/system/kubelet.service
+	[Service]
+	Environment=KUBELET_VERSION=v1.5.1_coreos.0
+	Environment="RKT_OPTS=--uuid-file-save=/var/run/kubelet-pod.uuid \
+	  --volume var-log,kind=host,source=/var/log \
+	  --mount volume=var-log,target=/var/log \
+	  --volume dns,kind=host,source=/etc/resolv.conf \
+	  --mount volume=dns,target=/etc/resolv.conf"
+	ExecStartPre=/usr/bin/mkdir -p /etc/kubernetes/manifests
+	ExecStartPre=/usr/bin/mkdir -p /var/log/containers
+	ExecStartPre=-/usr/bin/rkt rm --uuid-file=/var/run/kubelet-pod.uuid
+	ExecStart=/usr/lib/coreos/kubelet-wrapper \
+	  --api-servers=http://127.0.0.1:8080 \
+	  --register-schedulable=false \
+	  --cni-conf-dir=/etc/kubernetes/cni/net.d \
+	  --network-plugin=cni \
+	  --container-runtime=docker \
+	  --allow-privileged=true \
+	  --pod-manifest-path=/etc/kubernetes/manifests \
+	  --hostname-override=192.168.1.106 \
+	  --cluster_dns=10.3.0.10 \
+	  --cluster_domain=cluster.local
+	ExecStop=-/usr/bin/rkt stop --uuid-file=/var/run/kubelet-pod.uuid
+	Restart=always
+	RestartSec=10
+
+	[Install]
+	WantedBy=multi-user.target
+
+Now let's create the containers for kubernetes.
+
+#### Create the API Service Pod
+Here is the first one:
+
+	core # cat /etc/kubernetes/manifests/kube-apiserver.yaml
+	apiVersion: v1
+	kind: Pod
+	metadata:
+	  name: kube-apiserver
+	  namespace: kube-system
+	spec:
+	  hostNetwork: true
+	  containers:
+	  - name: kube-apiserver
+	    image: quay.io/coreos/hyperkube:v1.5.1_coreos.0
+	    command:
+	    - /hyperkube
+	    - apiserver
+	    - --bind-address=0.0.0.0
+	    - --etcd-servers=http://192.168.1.106:2379
+	    - --allow-privileged=true
+	    - --service-cluster-ip-range=10.3.0.0/24
+	    - --secure-port=443
+	    - --advertise-address=192.168.1.106
+	    - --admission-control=NamespaceLifecycle,LimitRanger,ServiceAccount,DefaultStorageClass,ResourceQuota
+	    - --tls-cert-file=/etc/kubernetes/ssl/apiserver.pem
+	    - --tls-private-key-file=/etc/kubernetes/ssl/apiserver-key.pem
+	    - --client-ca-file=/etc/kubernetes/ssl/ca.pem
+	    - --service-account-key-file=/etc/kubernetes/ssl/apiserver-key.pem
+	    - --runtime-config=extensions/v1beta1/networkpolicies=true
+	    - --anonymous-auth=false
+	    livenessProbe:
+	      httpGet:
+	        host: 127.0.0.1
+	        port: 8080
+	        path: /healthz
+	      initialDelaySeconds: 15
+	      timeoutSeconds: 15
+	    ports:
+	    - containerPort: 443
+	      hostPort: 443
+	      name: https
+	    - containerPort: 8080
+	      hostPort: 8080
+	      name: local
+	    volumeMounts:
+	    - mountPath: /etc/kubernetes/ssl
+	      name: ssl-certs-kubernetes
+	      readOnly: true
+	    - mountPath: /etc/ssl/certs
+	      name: ssl-certs-host
+	      readOnly: true
+	  volumes:
+	  - hostPath:
+	      path: /etc/kubernetes/ssl
+	    name: ssl-certs-kubernetes
+	  - hostPath:
+	      path: /usr/share/ca-certificates
+	    name: ssl-certs-host
+
+Next we have the **kube-proxy**
+
+#### Create the kube-proxy Pod
+Similar thing as the API server let's create a Pod for the kube-proxy:
+
+	core # cat /etc/kubernetes/manifests/kube-proxy.yaml
+	apiVersion: v1
+	kind: Pod
+	metadata:
+	  name: kube-proxy
+	  namespace: kube-system
+	spec:
+	  hostNetwork: true
+	  containers:
+	  - name: kube-proxy
+	    image: quay.io/coreos/hyperkube:v1.5.1_coreos.0
+	    command:
+	    - /hyperkube
+	    - proxy
+	    - --master=http://127.0.0.1:8080
+	    securityContext:
+	      privileged: true
+	    volumeMounts:
+	    - mountPath: /etc/ssl/certs
+	      name: ssl-certs-host
+	      readOnly: true
+	  volumes:
+	  - hostPath:
+	      path: /usr/share/ca-certificates
+	    name: ssl-certs-host
+
+Next is the **kube-controller-manager**.
+
+#### Create the kube-controller-manager Pod
+
+Here is the file:
+
+	core # cat /etc/kubernetes/manifests/kube-controller-manager.yaml
+	apiVersion: v1
+	kind: Pod
+	metadata:
+	  name: kube-controller-manager
+	  namespace: kube-system
+	spec:
+	  hostNetwork: true
+	  containers:
+	  - name: kube-controller-manager
+	    image: quay.io/coreos/hyperkube:v1.5.1_coreos.0
+	    command:
+	    - /hyperkube
+	    - controller-manager
+	    - --master=http://127.0.0.1:8080
+	    - --leader-elect=true
+	    - --service-account-private-key-file=/etc/kubernetes/ssl/apiserver-key.pem
+	    - --root-ca-file=/etc/kubernetes/ssl/ca.pem
+	    resources:
+	      requests:
+	        cpu: 200m
+	    livenessProbe:
+	      httpGet:
+	        host: 127.0.0.1
+	        path: /healthz
+	        port: 10252
+	      initialDelaySeconds: 15
+	      timeoutSeconds: 15
+	    volumeMounts:
+	    - mountPath: /etc/kubernetes/ssl
+	      name: ssl-certs-kubernetes
+	      readOnly: true
+	    - mountPath: /etc/ssl/certs
+	      name: ssl-certs-host
+	      readOnly: true
+	  hostNetwork: true
+	  volumes:
+	  - hostPath:
+	      path: /etc/kubernetes/ssl
+	    name: ssl-certs-kubernetes
+	  - hostPath:
+	      path: /usr/share/ca-certificates
+	    name: ssl-certs-host
+
+And lastly we have the **kube-scheduler**.
+
+#### Create the kube-scheduler Pod
+Here is the file for that:
+
+	core # cat /etc/kubernetes/manifests/kube-scheduler.yaml
+	apiVersion: v1
+	kind: Pod
+	metadata:
+	  name: kube-scheduler
+	  namespace: kube-system
+	spec:
+	  hostNetwork: true
+	  containers:
+	  - name: kube-scheduler
+	    image: quay.io/coreos/hyperkube:v1.5.1_coreos.0
+	    command:
+	    - /hyperkube
+	    - scheduler
+	    - --master=http://127.0.0.1:8080
+	    - --leader-elect=true
+	    resources:
+	      requests:
+	        cpu: 100m
+	    livenessProbe:
+	      httpGet:
+	        host: 127.0.0.1
+	        path: /healthz
+	        port: 10251
+	      initialDelaySeconds: 15
+	      timeoutSeconds: 15
+
+#### Starting up all services
+Now we just need to apply the configs and start up all the pods. First reload all the services:
+
+	core # systemctl daemon-reload
+	core # systemctl restart flanneld
+	core # systemctl restart docker
+
+And then lastly start the kubelet service:
+
+	core # systemd start kubelet
+	
 You should see something like this for the status:
 
 	core ~ # systemctl status kubelet -f
@@ -53,8 +356,10 @@ You can also make sure you can query the API service:
 	  "compiler": "gc",
 	  "platform": "linux/amd64"
 	}
-	
-Installing **kubectl**:
+
+
+#### Install kubectl
+The last thing we can do is install **kubectl** so we can manage the kubenetes cluster. Download the binary:
 
 	core ~ # cd /opt/bin/
 	core bin # curl -O https://storage.googleapis.com/kubernetes-release/release/v1.5.1/bin/linux/amd64/kubectl
@@ -70,6 +375,18 @@ Then configure **kubectl**:
 	Context "default-system" set.
 	core ~ # kubectl config use-context default-system
 	Switched to context "default-system".
+
+
+And now make the master available for new deployments:
+
+	core # kubectl get no
+	NAME            STATUS                     AGE
+	192.168.1.106   Ready,SchedulingDisabled   1h
+	core # kubectl uncordon 192.168.1.106
+	node "192.168.1.106" uncordoned
+	core # kubectl get no
+	NAME            STATUS    AGE
+	192.168.1.106   Ready     1h%
 
 At this point you can do a quick deploy and confirm the pod is up:
 
