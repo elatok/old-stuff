@@ -278,6 +278,15 @@ li.sidebarTitle {
 
 .post-link {
     font-size: 19px;
+    color: teal;
+}
+
+blockquote {
+    padding: 10px 1px;
+    margin: 0 0 20px;
+    font-size: 14.5px;
+    border-left: 5px solid #eee;
+    background: cornsilk;
 }
 
 .post-list p {
