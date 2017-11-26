@@ -1,5 +1,5 @@
 ---
-published: true
+published: false
 layout: post
 title: "Deploy Kuberbetes with kubeadm on Ubuntu 16.04"
 author: Karim Elatov
